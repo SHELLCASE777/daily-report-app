@@ -970,31 +970,47 @@ def register_monthly_routes(
         draft = _load_draft(data_dir, session["username"], draft_id)
         if draft is None:
             return jsonify({"error": "Report draft not found."}), 404
-        upload = request.files.get("timesheet")
-        if upload is None:
+        uploads = request.files.getlist("timesheet")
+        if not uploads:
             return jsonify({"error": "No timesheet file provided."}), 400
-        filename = str(upload.filename or "timesheet.xlsx").lower()
-        if not (filename.endswith(".xlsx") or filename.endswith(".xls")):
-            return jsonify({"error": "Please upload an Excel file (.xlsx)."}), 400
         try:
             from .timesheet_parser import parse_timesheet
-            result = parse_timesheet(upload.stream)
+            all_breakdown: list[dict] = []
+            parse_warnings: list[str] = []
+            for upload in uploads:
+                filename = str(upload.filename or "timesheet.xlsx")
+                if not filename.lower().endswith((".xlsx", ".xls")):
+                    parse_warnings.append(f"Skipped non-Excel file: {filename}")
+                    continue
+                try:
+                    result = parse_timesheet(upload.stream)
+                    all_breakdown.extend(result["daily_breakdown"])
+                except (ValueError, RuntimeError) as exc:
+                    parse_warnings.append(f"{filename}: {exc}")
+            if not all_breakdown:
+                msg = "No timesheet data could be parsed."
+                if parse_warnings:
+                    msg += " " + " | ".join(parse_warnings)
+                return jsonify({"error": msg}), 400
+            total_manpower = max(d["headcount"] for d in all_breakdown)
+            total_man_hours = round(sum(d["hours"] for d in all_breakdown), 2)
             merged = copy.deepcopy(draft)
             if not isinstance(merged.get("safety"), dict):
                 merged["safety"] = {}
-            merged["safety"]["total_manpower"] = result["total_manpower"]
-            merged["safety"]["total_man_hours"] = result["total_man_hours"]
-            merged["manpower_by_day"] = result["daily_breakdown"]
+            merged["safety"]["total_manpower"] = total_manpower
+            merged["safety"]["total_man_hours"] = total_man_hours
+            merged["manpower_by_day"] = all_breakdown
             merged["timesheet_source"] = "uploaded"
             _update_draft(data_dir, session["username"], merged)
             return jsonify({
                 "ok": True,
                 "draft": merged,
                 "parsed": {
-                    "total_manpower": result["total_manpower"],
-                    "total_man_hours": result["total_man_hours"],
-                    "days_found": len(result["daily_breakdown"]),
+                    "total_manpower": total_manpower,
+                    "total_man_hours": total_man_hours,
+                    "days_found": len(all_breakdown),
                 },
+                "warnings": parse_warnings,
             })
         except (ValueError, RuntimeError) as exc:
             return jsonify({"error": str(exc)}), 400
