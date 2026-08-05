@@ -331,6 +331,72 @@ def _extract_pdf_pages(
     return pages, warnings
 
 
+def _extract_pdf_images(
+    data: bytes,
+    filename: str = "report.pdf",
+    max_images: int = 15,
+    min_dimension: int = 100,
+    max_width: int = 1000,
+) -> list[dict[str, Any]]:
+    """Extract embedded images from a PDF as base64 data-URI strings.
+
+    Returns a list of dicts: {source, page, data (data-URI), ext}.
+    Never raises — returns [] on any error or missing dependency.
+    """
+    import base64
+
+    try:
+        from PIL import Image as PILImage, ImageOps
+        from pypdf import PdfReader
+    except ImportError:
+        return []
+
+    photos: list[dict[str, Any]] = []
+    try:
+        reader = PdfReader(io.BytesIO(data), strict=False)
+        for page_idx, page in enumerate(reader.pages, start=1):
+            if len(photos) >= max_images:
+                break
+            try:
+                page_images = page.images
+            except Exception:
+                continue
+            for img_obj in page_images:
+                if len(photos) >= max_images:
+                    break
+                try:
+                    raw = img_obj.data
+                    with PILImage.open(io.BytesIO(raw)) as im:
+                        w, h = im.size
+                        if w < min_dimension or h < min_dimension:
+                            continue
+                        if w > max_width:
+                            new_h = max(1, int(h * max_width / w))
+                            im = im.resize((max_width, new_h), PILImage.Resampling.LANCZOS)
+                        im = ImageOps.exif_transpose(im)
+                        if im.mode != "RGB":
+                            if im.mode in ("RGBA", "LA") or "transparency" in im.info:
+                                bg = PILImage.new("RGB", im.size, "white")
+                                bg.paste(im.convert("RGBA"), mask=im.convert("RGBA").getchannel("A"))
+                                im = bg
+                            else:
+                                im = im.convert("RGB")
+                        buf = io.BytesIO()
+                        im.save(buf, format="JPEG", quality=85, optimize=True)
+                        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                    photos.append({
+                        "source": filename,
+                        "page": page_idx,
+                        "data": f"data:image/jpeg;base64,{b64}",
+                        "ext": "jpg",
+                    })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return photos
+
+
 def _normalize_page_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\u00a0", " ").replace("\ufeff", "")
@@ -1102,6 +1168,9 @@ def import_daily_report_pdf(
     )
     if any(warning.get("severity") == "error" for warning in result["warnings"]):
         result["status"] = "needs_review"
+    result["photos"] = _extract_pdf_images(
+        data, filename=source_metadata["filename"]
+    )
     return result
 
 

@@ -24,6 +24,7 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Flowable,
     Frame,
+    Image as RLImage,
     LongTable,
     NextPageTemplate,
     PageBreak,
@@ -1228,6 +1229,93 @@ def _appendix_label(item: Mapping[str, Any]) -> str:
     return label
 
 
+def _photo_grid_flowables(
+    photos: list[dict[str, Any]],
+    styles: Mapping[str, ParagraphStyle],
+) -> list[Flowable]:
+    """Render a 3-column photo grid from photo_documentation entries."""
+    import base64 as _b64
+
+    try:
+        from PIL import Image as PILImage, ImageOps
+    except ImportError:
+        return [Paragraph("Photo documentation requires Pillow.", styles["placeholder"])]
+
+    PER_ROW = 3
+    BOX_W = BODY_WIDTH / PER_ROW
+    BOX_H = 147.0  # ≈52 mm in points
+    CAPTION_H = 13.0
+    PAD = 3.0
+
+    rows: list[list] = []
+    current_row: list = []
+
+    for photo in photos:
+        data_uri = photo.get("data", "")
+        source = str(photo.get("source", ""))
+        page = photo.get("page", "")
+        caption = f"{source}  p.{page}" if source else ""
+
+        img_cell: Any = ""
+        if data_uri and "," in data_uri:
+            try:
+                raw = _b64.b64decode(data_uri.split(",", 1)[1])
+                with PILImage.open(io.BytesIO(raw)) as im:
+                    im = ImageOps.exif_transpose(im)
+                    target_w = int(BOX_W - PAD * 2)
+                    target_h = int(BOX_H)
+                    fitted = ImageOps.fit(
+                        im.convert("RGB"),
+                        (target_w * 2, target_h * 2),
+                        method=PILImage.Resampling.LANCZOS,
+                    )
+                    buf = io.BytesIO()
+                    fitted.save(buf, format="JPEG", quality=85, optimize=True)
+                    buf.seek(0)
+                img_cell = RLImage(buf, width=target_w, height=BOX_H)
+            except Exception:
+                img_cell = ""
+
+        caption_para = Paragraph(escape(caption, quote=False), styles["small"])
+        card = Table(
+            [[caption_para], [img_cell]],
+            colWidths=[BOX_W - PAD * 2],
+            rowHeights=[CAPTION_H, BOX_H],
+        )
+        card.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, CYAN),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), PAD),
+            ("RIGHTPADDING", (0, 0), (-1, -1), PAD),
+            ("TOPPADDING", (0, 0), (-1, -1), PAD),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), PAD),
+            ("BACKGROUND", (0, 1), (0, 1), LIGHT_GREY if img_cell == "" else WHITE),
+        ]))
+        current_row.append(card)
+
+        if len(current_row) == PER_ROW:
+            rows.append(current_row)
+            current_row = []
+
+    if current_row:
+        while len(current_row) < PER_ROW:
+            current_row.append("")
+        rows.append(current_row)
+
+    if not rows:
+        return [Paragraph("No photo data could be decoded.", styles["placeholder"])]
+
+    grid = Table(rows, colWidths=[BOX_W] * PER_ROW, hAlign="LEFT")
+    grid.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return [grid]
+
+
 def _build_story(
     report: Mapping[str, Any],
     styles: Mapping[str, ParagraphStyle],
@@ -1237,6 +1325,13 @@ def _build_story(
     include_s_curve = _coerce_bool(report.get("include_s_curve"), bool(progress))
     curve = _normalise_s_curve(report.get("s_curve"), progress) if include_s_curve else None
     appendices = _normalise_appendices(report.get("appendices"), has_s_curve=curve is not None)
+    photos = _as_list(report.get("photo_documentation"))
+    if photos:
+        for item in appendices:
+            if item.get("number") == "6.6":
+                item["status"] = "Attached"
+                item["content"] = "__photos__"
+                break
 
     story: list[Flowable] = [
         Spacer(1, 1),
@@ -1433,9 +1528,12 @@ def _build_story(
                 styles["h1"],
             ),
         ])
-        story.extend(_content_flowables(
-            content, styles, empty_message="No appendix content supplied.", bullets=True,
-        ))
+        if content == "__photos__":
+            story.extend(_photo_grid_flowables(photos, styles))
+        else:
+            story.extend(_content_flowables(
+                content, styles, empty_message="No appendix content supplied.", bullets=True,
+            ))
     return story
 
 

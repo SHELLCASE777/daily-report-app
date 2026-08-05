@@ -706,6 +706,7 @@ def register_monthly_routes(
             config = config_provider()
             known_projects = config.get("projects", []) if isinstance(config, dict) else []
             records = []
+            all_photos: list[dict] = []
             warnings = [
                 "Uploaded PDF mode extracts report identity and activity text. "
                 "Manpower, progress, safety, engineering, and procurement values must be checked or entered manually."
@@ -763,6 +764,7 @@ def register_monthly_routes(
                     warnings.append(f"{filename}: parser result needs manual review.")
                 for warning in imported.get("warnings", []):
                     warnings.append(f"{filename}: {_warning_text(warning)}")
+                all_photos.extend(imported.get("photos") or [])
 
             if not records:
                 error = (
@@ -805,6 +807,8 @@ def register_monthly_routes(
                 extra_warnings=warnings,
                 report_type=kind,
             )
+            if all_photos:
+                draft["photo_documentation"] = all_photos[:60]
             draft_id = _save_draft(data_dir, session["username"], draft)
             draft["draft_id"] = draft_id
             return jsonify({"ok": True, "draft_id": draft_id, "draft": draft})
