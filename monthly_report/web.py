@@ -1006,6 +1006,36 @@ def register_monthly_routes(
         except (IndexError, ValueError):
             return None, None
 
+    def _filter_to_period(
+        breakdown: list[dict],
+        date_from: str,
+        date_to: str,
+        year: int | None,
+        month: int | None,
+    ) -> list[dict]:
+        """Keep only breakdown entries whose date falls within the report period."""
+        if not date_from or not date_to:
+            return breakdown
+        from datetime import date as _date
+        result = []
+        for entry in breakdown:
+            d = entry.get("date", "")
+            if d.startswith("day-"):
+                if year and month:
+                    try:
+                        day_num = int(d.split("-")[1])
+                        actual = _date(year, month, day_num).strftime("%Y-%m-%d")
+                        if date_from <= actual <= date_to:
+                            result.append(entry)
+                    except (ValueError, IndexError):
+                        result.append(entry)
+                else:
+                    result.append(entry)
+            else:
+                if date_from <= d <= date_to:
+                    result.append(entry)
+        return result
+
     @app.post("/monthly/timesheet/<draft_id>")
     def monthly_upload_timesheet(draft_id: str):
         auth = require_login_json()
@@ -1037,6 +1067,14 @@ def register_monthly_routes(
                 if parse_warnings:
                     msg += " " + " | ".join(parse_warnings)
                 return jsonify({"error": msg}), 400
+            all_breakdown = _filter_to_period(
+                all_breakdown,
+                draft.get("date_from") or "",
+                draft.get("date_to") or "",
+                year, month,
+            )
+            if not all_breakdown:
+                return jsonify({"error": "No timesheet entries fall within the report period."}), 400
             total_manpower = max(d["headcount"] for d in all_breakdown)
             regular_man_hours = round(sum(d["hours"] for d in all_breakdown), 2)
             ot_man_hours = float(draft.get("safety", {}).get("ot_man_hours") or 0)
@@ -1099,6 +1137,12 @@ def register_monthly_routes(
                 if parse_warnings:
                     msg += " " + " | ".join(parse_warnings)
                 return jsonify({"error": msg}), 400
+            all_ot_breakdown = _filter_to_period(
+                all_ot_breakdown,
+                draft.get("date_from") or "",
+                draft.get("date_to") or "",
+                year, month,
+            )
             ot_man_hours = round(sum(d["hours"] for d in all_ot_breakdown), 2)
             regular_man_hours = float(draft.get("safety", {}).get("regular_man_hours") or
                                       draft.get("safety", {}).get("total_man_hours") or 0)

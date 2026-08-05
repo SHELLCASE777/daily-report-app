@@ -126,7 +126,12 @@ def _day_date_str(day_num: int, year: int | None, month: int | None) -> str:
 
 
 def _detect_day_cols(row: list) -> dict[int, int]:
-    """Return {col_index: day_number} for a header row containing day numbers 1–31."""
+    """Return {col_index: day_number} for a header row containing day numbers 1–31.
+
+    Requires at least 10 *distinct* day numbers spanning a range of at least 10,
+    so that data rows filled with 1s (present/absent marks) are never mistaken
+    for date-header rows.
+    """
     day_cols: dict[int, int] = {}
     for j, cell in enumerate(row):
         if isinstance(cell, bool):
@@ -135,6 +140,11 @@ def _detect_day_cols(row: list) -> dict[int, int]:
             day_cols[j] = cell
         elif isinstance(cell, (date_cls, datetime)):
             day_cols[j] = cell.day
+    distinct = set(day_cols.values())
+    if len(distinct) < 10:
+        return {}
+    if max(distinct) - min(distinct) < 9:
+        return {}
     return day_cols
 
 
@@ -150,7 +160,7 @@ def _try_layout_a(
 ) -> dict[str, Any] | None:
     for header_idx, row in enumerate(rows[:20]):
         day_cols = _detect_day_cols(row)
-        if len(day_cols) < 10:
+        if not day_cols:
             continue
 
         daily: dict[int, dict[str, float]] = defaultdict(lambda: {"headcount": 0.0, "hours": 0.0})
@@ -161,6 +171,9 @@ def _try_layout_a(
             first = str(data_row[0] or "").strip().lower()
             if first in _SKIP_LABELS:
                 continue
+            # Skip rows that look like another header (distinct day numbers)
+            if _detect_day_cols(data_row):
+                continue
             for col_idx, day_num in day_cols.items():
                 if col_idx >= len(data_row):
                     continue
@@ -168,7 +181,6 @@ def _try_layout_a(
                 mark = str(cell or "").strip().lower()
                 is_present = mark in _ATTENDANCE_MARKS
                 if not is_present:
-                    # Treat any positive number as present (some timesheets use 1.0)
                     h = _num(cell)
                     is_present = h > 0
                 if is_present:
@@ -272,7 +284,7 @@ def _try_layout_a_ot(
 ) -> dict[str, Any] | None:
     for header_idx, row in enumerate(rows[:20]):
         day_cols = _detect_day_cols(row)
-        if len(day_cols) < 10:
+        if not day_cols:
             continue
 
         daily: dict[int, dict[str, float]] = defaultdict(lambda: {"headcount": 0.0, "hours": 0.0})
@@ -282,6 +294,8 @@ def _try_layout_a_ot(
                 continue
             first = str(data_row[0] or "").strip().lower()
             if first in _SKIP_LABELS:
+                continue
+            if _detect_day_cols(data_row):
                 continue
             for col_idx, day_num in day_cols.items():
                 if col_idx >= len(data_row):
