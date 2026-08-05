@@ -997,6 +997,15 @@ def register_monthly_routes(
             app.logger.exception("Photo update failed")
             return jsonify({"error": str(exc)}), 500
 
+    def _period_year_month(draft: dict) -> tuple[int | None, int | None]:
+        """Extract year and month from draft date_from for weekday-aware calculation."""
+        date_from = draft.get("date_from") or ""
+        try:
+            parts = str(date_from).split("-")
+            return int(parts[0]), int(parts[1])
+        except (IndexError, ValueError):
+            return None, None
+
     @app.post("/monthly/timesheet/<draft_id>")
     def monthly_upload_timesheet(draft_id: str):
         auth = require_login_json()
@@ -1010,6 +1019,7 @@ def register_monthly_routes(
             return jsonify({"error": "No timesheet file provided."}), 400
         try:
             from .timesheet_parser import parse_timesheet
+            year, month = _period_year_month(draft)
             all_breakdown: list[dict] = []
             parse_warnings: list[str] = []
             for upload in uploads:
@@ -1018,7 +1028,7 @@ def register_monthly_routes(
                     parse_warnings.append(f"Skipped non-Excel file: {filename}")
                     continue
                 try:
-                    result = parse_timesheet(upload.stream)
+                    result = parse_timesheet(upload.stream, year=year, month=month)
                     all_breakdown.extend(result["daily_breakdown"])
                 except (ValueError, RuntimeError) as exc:
                     parse_warnings.append(f"{filename}: {exc}")
@@ -1028,11 +1038,14 @@ def register_monthly_routes(
                     msg += " " + " | ".join(parse_warnings)
                 return jsonify({"error": msg}), 400
             total_manpower = max(d["headcount"] for d in all_breakdown)
-            total_man_hours = round(sum(d["hours"] for d in all_breakdown), 2)
+            regular_man_hours = round(sum(d["hours"] for d in all_breakdown), 2)
+            ot_man_hours = float(draft.get("safety", {}).get("ot_man_hours") or 0)
+            total_man_hours = round(regular_man_hours + ot_man_hours, 2)
             merged = copy.deepcopy(draft)
             if not isinstance(merged.get("safety"), dict):
                 merged["safety"] = {}
             merged["safety"]["total_manpower"] = total_manpower
+            merged["safety"]["regular_man_hours"] = regular_man_hours
             merged["safety"]["total_man_hours"] = total_man_hours
             merged["manpower_by_day"] = all_breakdown
             merged["timesheet_source"] = "uploaded"
@@ -1042,6 +1055,8 @@ def register_monthly_routes(
                 "draft": merged,
                 "parsed": {
                     "total_manpower": total_manpower,
+                    "regular_man_hours": regular_man_hours,
+                    "ot_man_hours": ot_man_hours,
                     "total_man_hours": total_man_hours,
                     "days_found": len(all_breakdown),
                 },
@@ -1052,6 +1067,65 @@ def register_monthly_routes(
         except Exception as exc:
             app.logger.exception("Timesheet parsing failed")
             return jsonify({"error": f"Timesheet parsing failed: {exc}"}), 500
+
+    @app.post("/monthly/overtime/<draft_id>")
+    def monthly_upload_overtime(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        draft = _load_draft(data_dir, session["username"], draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        uploads = request.files.getlist("overtime")
+        if not uploads:
+            return jsonify({"error": "No OT timesheet file provided."}), 400
+        try:
+            from .timesheet_parser import parse_overtime_timesheet
+            year, month = _period_year_month(draft)
+            all_ot_breakdown: list[dict] = []
+            parse_warnings: list[str] = []
+            for upload in uploads:
+                filename = str(upload.filename or "overtime.xlsx")
+                if not filename.lower().endswith((".xlsx", ".xls")):
+                    parse_warnings.append(f"Skipped non-Excel file: {filename}")
+                    continue
+                try:
+                    result = parse_overtime_timesheet(upload.stream, year=year, month=month)
+                    all_ot_breakdown.extend(result["daily_ot_breakdown"])
+                except (ValueError, RuntimeError) as exc:
+                    parse_warnings.append(f"{filename}: {exc}")
+            if not all_ot_breakdown:
+                msg = "No OT data could be parsed."
+                if parse_warnings:
+                    msg += " " + " | ".join(parse_warnings)
+                return jsonify({"error": msg}), 400
+            ot_man_hours = round(sum(d["hours"] for d in all_ot_breakdown), 2)
+            regular_man_hours = float(draft.get("safety", {}).get("regular_man_hours") or
+                                      draft.get("safety", {}).get("total_man_hours") or 0)
+            total_man_hours = round(regular_man_hours + ot_man_hours, 2)
+            merged = copy.deepcopy(draft)
+            if not isinstance(merged.get("safety"), dict):
+                merged["safety"] = {}
+            merged["safety"]["ot_man_hours"] = ot_man_hours
+            merged["safety"]["total_man_hours"] = total_man_hours
+            merged["ot_by_day"] = all_ot_breakdown
+            _update_draft(data_dir, session["username"], merged)
+            return jsonify({
+                "ok": True,
+                "draft": merged,
+                "parsed": {
+                    "ot_man_hours": ot_man_hours,
+                    "regular_man_hours": regular_man_hours,
+                    "total_man_hours": total_man_hours,
+                    "days_found": len(all_ot_breakdown),
+                },
+                "warnings": parse_warnings,
+            })
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            app.logger.exception("OT timesheet parsing failed")
+            return jsonify({"error": f"OT timesheet parsing failed: {exc}"}), 500
 
     @app.post("/monthly/ai_draft/<draft_id>")
     def monthly_ai_draft(draft_id: str):

@@ -272,6 +272,7 @@
           <div class="d-flex gap-2 align-items-center flex-wrap">
             <input type="file" class="form-control form-control-sm" id="timesheet-file" accept=".xlsx,.xls" multiple style="max-width:300px;">
             <button class="btn btn-sm btn-outline-secondary" id="timesheet-btn" onclick="uploadTimesheet()">Process Timesheet</button>
+            <button class="btn btn-sm btn-outline-warning" onclick="openOTModal()">+ Upload OT</button>
           </div>
           <div class="small text-success mt-1 d-none" id="timesheet-result"></div>
         </div>
@@ -982,6 +983,46 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePeriodLimits();
     invalidateCompiledDraft();
   });
+  document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
+  document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
+  toggleFinalConfirmation();
+  if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
+});
+
+function openOTModal() {
+  document.getElementById('ot-result').className = 'small text-muted d-none';
+  document.getElementById('ot-result').textContent = '';
+  document.getElementById('ot-file').value = '';
+  new bootstrap.Modal(document.getElementById('otModal')).show();
+}
+
+async function uploadOTTimesheet() {
+  const files = document.getElementById('ot-file').files;
+  if (!files.length) { alert('Choose at least one OT timesheet file.'); return; }
+  const resultEl = document.getElementById('ot-result');
+  setLoading('ot-upload-btn', true, 'Processing…');
+  resultEl.className = 'small text-muted';
+  resultEl.textContent = 'Parsing…';
+  const form = new FormData();
+  Array.from(files).forEach(f => form.append('overtime', f));
+  try {
+    const res = await fetch(`/monthly/overtime/${encodeURIComponent(monthlyDraftId)}`, {method: 'POST', body: form});
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'OT upload failed');
+    const p = data.parsed;
+    resultEl.className = 'small text-success';
+    resultEl.textContent = `OT processed — ${p.ot_man_hours} OT wh added. Total man-hours now: ${p.total_man_hours} wh.`;
+    if (data.warnings?.length) resultEl.textContent += ' Warnings: ' + data.warnings.join(' | ');
+    populateMonthlyReview(data.draft);
+    bootstrap.Modal.getInstance(document.getElementById('otModal'))?.hide();
+  } catch (err) {
+    resultEl.className = 'small text-danger';
+    resultEl.textContent = 'Error: ' + err.message;
+  } finally {
+    setLoading('ot-upload-btn', false);
+  }
+}
 
 function openPhotoModal() {
   const grid = document.getElementById('photo-review-grid');
@@ -1039,13 +1080,35 @@ async function savePhotoReview() {
     btn.disabled = false;
   }
 }
-  document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
-  document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
-  document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
-  toggleFinalConfirmation();
-  if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
-});
 </script>
+
+<!-- OT Timesheet Modal -->
+<div class="modal fade" id="otModal" tabindex="-1" aria-labelledby="otModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="otModalLabel">⏱ Upload Overtime Timesheet</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-info py-2 small mb-3">
+          <strong>Expected format:</strong> Same employee × day matrix as the regular timesheet,
+          but cell values are <strong>actual OT hours</strong> (e.g. 2, 3.5).
+          Leave blank or 0 for days with no OT. OT hours are counted at flat 1× — no weekend multiplier.
+        </div>
+        <div class="mb-3">
+          <label class="form-label small fw-semibold">OT Timesheet File(s)</label>
+          <input type="file" class="form-control form-control-sm" id="ot-file" accept=".xlsx,.xls" multiple style="max-width:360px;">
+        </div>
+        <div class="small text-muted d-none" id="ot-result"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning" id="ot-upload-btn" onclick="uploadOTTimesheet()">Process OT</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Photo Review Modal -->
 <div class="modal fade" id="photoReviewModal" tabindex="-1" aria-labelledby="photoReviewModalLabel" aria-hidden="true">
