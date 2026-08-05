@@ -657,7 +657,12 @@ async function compileMonthly() {
     }
 
     const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
+    if (!response.ok || !data.ok) {
+      let msg = data.error || `Could not compile ${reportType} report.`;
+      if (Array.isArray(data.warnings) && data.warnings.length)
+        msg += '\n\nFile warnings:\n' + data.warnings.map(w => '• ' + w).join('\n');
+      throw new Error(msg);
+    }
     monthlyDraftId = data.draft_id;
     _monthlyAiHistory = [];
     document.getElementById('ai-draft-status').className = 'small mt-2 d-none';
