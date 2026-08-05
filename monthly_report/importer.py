@@ -389,6 +389,7 @@ def _extract_pdf_images(
                         "page": page_idx,
                         "data": f"data:image/jpeg;base64,{b64}",
                         "ext": "jpg",
+                        "caption": "",
                     })
                 except Exception:
                     continue

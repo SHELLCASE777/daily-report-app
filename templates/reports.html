@@ -292,6 +292,18 @@
           <div class="small mt-2 d-none" id="ai-draft-status"></div>
         </div>
 
+        <!-- Photo documentation review card -->
+        <div class="mb-4 border rounded p-3 d-none" id="photo-review-card" style="background:#f8fafc;">
+          <div class="d-flex align-items-center gap-2 flex-wrap">
+            <strong class="small">📷 Photo Documentation</strong>
+            <span class="badge text-bg-secondary" id="photo-count-badge">0 photos</span>
+            <span class="text-muted" style="font-size:.75rem;">Review captions and remove unwanted images (e.g. signatures) before generating the PDF.</span>
+          </div>
+          <div class="mt-2">
+            <button class="btn btn-sm btn-outline-primary" onclick="openPhotoModal()">Review &amp; Edit Photos</button>
+          </div>
+        </div>
+
         <div class="mb-4 d-none" id="source-manifest-panel">
           <div class="section-label">Included Daily Reports</div>
           <div class="table-responsive">
@@ -412,6 +424,7 @@ let monthlySource = 'stored_json';
 let monthlyDraftId = '';
 let reportType = 'monthly';
 let _monthlyAiHistory = [];
+let _monthlyPhotos = [];
 
 function parseIsoDate(value) {
   if (!value) return null;
@@ -665,6 +678,7 @@ async function compileMonthly() {
     }
     monthlyDraftId = data.draft_id;
     _monthlyAiHistory = [];
+    _monthlyPhotos = [];
     document.getElementById('ai-draft-status').className = 'small mt-2 d-none';
     document.getElementById('timesheet-result').className = 'small text-success mt-1 d-none';
     populateMonthlyReview(data.draft);
@@ -721,6 +735,14 @@ function populateMonthlyReview(draft) {
   rows.forEach(row => addProgressRow(row));
   if (!rows.length) addProgressRow();
   toggleFinalConfirmation();
+
+  // Photo documentation
+  const photos = draft.photo_documentation || [];
+  _monthlyPhotos = photos.map(p => Object.assign({}, p));
+  const photoCard = document.getElementById('photo-review-card');
+  const photoBadge = document.getElementById('photo-count-badge');
+  photoCard.classList.toggle('d-none', photos.length === 0);
+  photoBadge.textContent = photos.length + ' photo' + (photos.length !== 1 ? 's' : '');
 }
 
 function populateSourceManifest(rows) {
@@ -960,6 +982,63 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePeriodLimits();
     invalidateCompiledDraft();
   });
+
+function openPhotoModal() {
+  const grid = document.getElementById('photo-review-grid');
+  grid.innerHTML = '';
+  document.getElementById('photo-save-status').textContent = '';
+  if (!_monthlyPhotos.length) {
+    grid.innerHTML = '<div class="col-12 text-muted small">No photos extracted from the uploaded PDFs.</div>';
+  } else {
+    _monthlyPhotos.forEach((photo, idx) => {
+      const col = document.createElement('div');
+      col.className = 'col-12 col-sm-6 col-md-4';
+      col.id = 'photo-card-' + idx;
+      col.innerHTML =
+        '<div class="border rounded p-2 position-relative h-100" style="background:#fff;">' +
+          '<button type="button" class="btn-close position-absolute" style="top:6px;right:6px;z-index:1;" ' +
+            'onclick="removePhoto(' + idx + ')" aria-label="Remove"></button>' +
+          '<img src="' + photo.data + '" class="rounded mb-2" ' +
+            'style="width:100%;height:160px;object-fit:cover;display:block;">' +
+          '<div class="text-muted mb-1" style="font-size:.72rem;">' + photo.source + ' — p.' + photo.page + '</div>' +
+          '<textarea class="form-control form-control-sm" rows="2" placeholder="Add caption…" ' +
+            'oninput="_monthlyPhotos[' + idx + '].caption = this.value">' +
+            (photo.caption || '') +
+          '</textarea>' +
+        '</div>';
+      grid.appendChild(col);
+    });
+  }
+  new bootstrap.Modal(document.getElementById('photoReviewModal')).show();
+}
+
+function removePhoto(idx) {
+  _monthlyPhotos.splice(idx, 1);
+  openPhotoModal();
+}
+
+async function savePhotoReview() {
+  const statusEl = document.getElementById('photo-save-status');
+  const btn = document.getElementById('photo-save-btn');
+  btn.disabled = true;
+  statusEl.textContent = 'Saving…';
+  try {
+    const res = await fetch('/monthly/photos/' + encodeURIComponent(monthlyDraftId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photos: _monthlyPhotos}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+    const badge = document.getElementById('photo-count-badge');
+    badge.textContent = _monthlyPhotos.length + ' photo' + (_monthlyPhotos.length !== 1 ? 's' : '');
+    bootstrap.Modal.getInstance(document.getElementById('photoReviewModal'))?.hide();
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
   document.getElementById('monthly-project').addEventListener('change', () => invalidateCompiledDraft());
   document.getElementById('monthly-pdf-files').addEventListener('change', () => invalidateCompiledDraft());
   document.getElementById('monthly-all-users')?.addEventListener('change', () => invalidateCompiledDraft());
@@ -967,5 +1046,26 @@ document.addEventListener('DOMContentLoaded', () => {
   if (location.hash === '#monthly') new bootstrap.Tab(document.getElementById('monthly-tab')).show();
 });
 </script>
+
+<!-- Photo Review Modal -->
+<div class="modal fade" id="photoReviewModal" tabindex="-1" aria-labelledby="photoReviewModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="photoReviewModalLabel">📷 Review Photo Documentation</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">Remove signatures or irrelevant images using the × button, then add a caption for each photo. These appear in Appendix 6.6 of the generated PDF.</p>
+        <div id="photo-review-grid" class="row g-3"></div>
+      </div>
+      <div class="modal-footer">
+        <span class="text-muted small me-auto" id="photo-save-status"></span>
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="photo-save-btn" onclick="savePhotoReview()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>

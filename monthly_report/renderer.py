@@ -1254,7 +1254,7 @@ def _photo_grid_flowables(
         data_uri = photo.get("data", "")
         source = str(photo.get("source", ""))
         page = photo.get("page", "")
-        caption = f"{source}  p.{page}" if source else ""
+        caption = photo.get("caption") or (f"{source}  p.{page}" if source else "")
 
         img_cell: Any = ""
         if data_uri and "," in data_uri:

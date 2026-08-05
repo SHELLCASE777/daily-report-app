@@ -966,6 +966,37 @@ def register_monthly_routes(
             return "Not found", 404
         return send_file(path, as_attachment=True, download_name=basename, mimetype="application/pdf")
 
+    @app.patch("/monthly/photos/<draft_id>")
+    def monthly_update_photos(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        try:
+            draft = _load_draft(data_dir, session["username"], draft_id)
+            if draft is None:
+                return jsonify({"error": "Report draft not found."}), 404
+            body = request.get_json(silent=True) or {}
+            photos = body.get("photos")
+            if not isinstance(photos, list):
+                return jsonify({"error": "photos must be a list"}), 400
+            cleaned = []
+            for p in photos:
+                if not isinstance(p, dict):
+                    continue
+                cleaned.append({
+                    "source": str(p.get("source", "")),
+                    "page": p.get("page", 0),
+                    "data": str(p.get("data", "")),
+                    "ext": str(p.get("ext", "jpg")),
+                    "caption": str(p.get("caption", ""))[:500],
+                })
+            draft["photo_documentation"] = cleaned
+            _update_draft(data_dir, session["username"], draft)
+            return jsonify({"ok": True, "count": len(cleaned)})
+        except Exception as exc:
+            app.logger.exception("Photo update failed")
+            return jsonify({"error": str(exc)}), 500
+
     @app.post("/monthly/timesheet/<draft_id>")
     def monthly_upload_timesheet(draft_id: str):
         auth = require_login_json()
