@@ -6,3 +6,4 @@ python-docx>=1.2,<2
 anthropic>=0.64,<1
 pypdf>=5,<7
 rapidfuzz>=3.10,<4
+openpyxl>=3.1,<4

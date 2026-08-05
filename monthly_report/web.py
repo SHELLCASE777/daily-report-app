@@ -965,6 +965,234 @@ def register_monthly_routes(
             return "Not found", 404
         return send_file(path, as_attachment=True, download_name=basename, mimetype="application/pdf")
 
+    @app.post("/monthly/timesheet/<draft_id>")
+    def monthly_upload_timesheet(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        draft = _load_draft(data_dir, session["username"], draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        upload = request.files.get("timesheet")
+        if upload is None:
+            return jsonify({"error": "No timesheet file provided."}), 400
+        filename = str(upload.filename or "timesheet.xlsx").lower()
+        if not (filename.endswith(".xlsx") or filename.endswith(".xls")):
+            return jsonify({"error": "Please upload an Excel file (.xlsx)."}), 400
+        try:
+            from .timesheet_parser import parse_timesheet
+            result = parse_timesheet(upload.stream)
+            merged = copy.deepcopy(draft)
+            if not isinstance(merged.get("safety"), dict):
+                merged["safety"] = {}
+            merged["safety"]["total_manpower"] = result["total_manpower"]
+            merged["safety"]["total_man_hours"] = result["total_man_hours"]
+            merged["manpower_by_day"] = result["daily_breakdown"]
+            merged["timesheet_source"] = "uploaded"
+            _update_draft(data_dir, session["username"], merged)
+            return jsonify({
+                "ok": True,
+                "draft": merged,
+                "parsed": {
+                    "total_manpower": result["total_manpower"],
+                    "total_man_hours": result["total_man_hours"],
+                    "days_found": len(result["daily_breakdown"]),
+                },
+            })
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            app.logger.exception("Timesheet parsing failed")
+            return jsonify({"error": f"Timesheet parsing failed: {exc}"}), 500
+
+    @app.post("/monthly/ai_draft/<draft_id>")
+    def monthly_ai_draft(draft_id: str):
+        auth = require_login_json()
+        if auth:
+            return auth
+        try:
+            import anthropic as _anthropic_mod
+        except ImportError:
+            return jsonify({"error": "AI features require the anthropic package."}), 500
+        draft = _load_draft(data_dir, session["username"], draft_id)
+        if draft is None:
+            return jsonify({"error": "Report draft not found."}), 404
+        try:
+            body = request.get_json(silent=True) or {}
+            instruction = _clean_text(body.get("instruction"), 2_000)
+            config = config_provider()
+            api_key = (
+                os.environ.get("ANTHROPIC_API_KEY")
+                or (config.get("ai_api_key") if isinstance(config, dict) else None)
+            )
+            if not api_key:
+                return jsonify({"error": "AI API key is not configured on this server."}), 503
+
+            kind = _draft_report_type(draft)
+            period = draft.get("period") if isinstance(draft.get("period"), dict) else {}
+            site = draft.get("site") if isinstance(draft.get("site"), dict) else {}
+            safety = draft.get("safety") if isinstance(draft.get("safety"), dict) else {}
+            progress = draft.get("progress") if isinstance(draft.get("progress"), dict) else {}
+            progress_rows = [r for r in progress.get("rows", []) if isinstance(r, dict) and not r.get("is_total")]
+            manpower_by_day = draft.get("manpower_by_day") if isinstance(draft.get("manpower_by_day"), list) else []
+
+            ctx: list[str] = [
+                f"Report type: {kind}",
+                f"Project: {draft.get('project_title', draft.get('project_no', 'N/A'))}",
+                f"Period: {period.get('start', '')} to {period.get('end', '')}",
+                f"Manpower: {safety.get('total_manpower', 0)} peak headcount, "
+                f"{safety.get('total_man_hours', 0)} total man-hours",
+            ]
+            if manpower_by_day:
+                peak = max(manpower_by_day, key=lambda d: d.get("headcount", 0), default=None)
+                if peak:
+                    ctx.append(f"Peak working day: {peak.get('date', '')} — {peak.get('headcount', 0)} workers")
+
+            this_acts = site.get("this_month_activities", [])
+            if this_acts:
+                ctx.append(f"\nThis {kind} activities ({len(this_acts)} items):")
+                ctx.extend(f"  - {a}" for a in this_acts[:150])
+
+            next_acts = site.get("next_month_activities", [])
+            if next_acts:
+                ctx.append(f"\nNext {kind} planned activities ({len(next_acts)} items):")
+                ctx.extend(f"  - {a}" for a in next_acts[:80])
+
+            concerns = site.get("concerns", [])
+            if concerns:
+                ctx.append(f"\nConstraints / Concerns ({len(concerns)} items):")
+                for c in concerns[:60]:
+                    if isinstance(c, dict):
+                        ctx.append(f"  - {c.get('concern', '')} → {c.get('corrective_action', '')}")
+                    else:
+                        ctx.append(f"  - {c}")
+
+            if progress_rows:
+                ctx.append(f"\nProgress rows (keep numbers VERBATIM — only improve descriptions):")
+                for r in progress_rows[:30]:
+                    ctx.append(
+                        f"  - desc='{r.get('description','')}' weight={r.get('weight',0)}% "
+                        f"prev={r.get('previous',0)}% this={r.get('this_month',0)}% plan={r.get('plan',0)}%"
+                    )
+
+            context_text = "\n".join(ctx)
+            user_content = context_text
+            if instruction:
+                user_content += f"\n\nAdditional instruction: {instruction}"
+
+            system_prompt = (
+                "You are an expert construction project report writer generating professional "
+                f"{kind} progress reports for PT. Garuda Prima Aksara.\n\n"
+                "Respond ONLY with valid JSON — no markdown fences, no explanation text.\n\n"
+                "RULES:\n"
+                "1. progress.rows: Copy weight/previous/this_month/plan values VERBATIM. "
+                "Rewrite description text to be concise and professional. Do NOT invent numbers.\n"
+                "2. safety: Copy total_manpower and total_man_hours verbatim from input. "
+                "Set recordable_cases/lost_workdays/lost_time_injuries to 0 unless constraints mention incidents.\n"
+                "3. equipment_delivery.rows / shipments: Extract any equipment or delivery mentions "
+                "from activities and constraints, or return empty arrays if none found.\n"
+                "4. Language: respond in the same language as the activities text.\n"
+                "5. Do NOT include an 'appendices' key.\n\n"
+                "Output this exact structure:\n"
+                '{"executive_summary":"string",'
+                '"progress":{"rows":[{"description":"string","weight":0.0,"previous":0.0,"this_month":0.0,"plan":0.0}]},'
+                '"safety":{"total_manpower":0,"total_man_hours":0.0,"recordable_cases":0,"lost_workdays":0,"lost_time_injuries":0},'
+                '"engineering":{"summary":"string"},'
+                '"procurement":{"summary":"string"},'
+                '"equipment_delivery":{"rows":[]},'
+                '"shipments":[],'
+                '"site":{"schedule_status":"string","this_month_activities":["string"],'
+                '"next_month_activities":["string"],"concerns":[{"concern":"string","corrective_action":"string"}]}}'
+            )
+
+            client = _anthropic_mod.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_content}],
+            )
+
+            raw_text = response.content[0].text if response.content else ""
+            stripped = raw_text.strip()
+            if stripped.startswith("```"):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else stripped[3:]
+            if stripped.endswith("```"):
+                stripped = stripped.rsplit("```", 1)[0]
+
+            try:
+                patch = json.loads(stripped.strip())
+            except json.JSONDecodeError as exc:
+                app.logger.error("AI returned non-JSON: %s", exc)
+                return jsonify({"error": f"AI returned invalid JSON: {exc}"}), 502
+
+            if not isinstance(patch, dict):
+                return jsonify({"error": "AI response was not a JSON object."}), 502
+
+            merged = copy.deepcopy(draft)
+
+            if patch.get("executive_summary"):
+                merged["executive_summary"] = str(patch["executive_summary"])
+
+            for key in ("engineering", "procurement"):
+                if isinstance(patch.get(key), dict) and patch[key].get("summary"):
+                    if not isinstance(merged.get(key), dict):
+                        merged[key] = {}
+                    merged[key]["summary"] = str(patch[key]["summary"])
+                    if key == "procurement" and isinstance(patch[key].get("rows"), list):
+                        merged[key]["rows"] = patch[key]["rows"]
+
+            for key in ("equipment_delivery", "shipments"):
+                if key in patch:
+                    merged[key] = patch[key]
+
+            if isinstance(patch.get("safety"), dict):
+                if not isinstance(merged.get("safety"), dict):
+                    merged["safety"] = {}
+                for skey in ("total_manpower", "total_man_hours", "recordable_cases", "lost_workdays", "lost_time_injuries"):
+                    if skey in patch["safety"]:
+                        merged["safety"][skey] = patch["safety"][skey]
+
+            if isinstance(patch.get("site"), dict):
+                if not isinstance(merged.get("site"), dict):
+                    merged["site"] = {}
+                for sk in ("schedule_status", "this_month_activities", "next_month_activities", "concerns"):
+                    if patch["site"].get(sk):
+                        merged["site"][sk] = patch["site"][sk]
+                merged["site"]["current_period_activities"] = merged["site"].get("this_month_activities", [])
+                merged["site"]["this_period_activities"] = merged["site"].get("this_month_activities", [])
+                merged["site"]["next_period_activities"] = merged["site"].get("next_month_activities", [])
+                if kind == "weekly":
+                    merged["site"]["this_week_activities"] = merged["site"].get("this_month_activities", [])
+                    merged["site"]["next_week_activities"] = merged["site"].get("next_month_activities", [])
+
+            if isinstance(patch.get("progress"), dict):
+                patch_rows = [r for r in patch["progress"].get("rows", []) if isinstance(r, dict) and r.get("description")]
+                if patch_rows and progress_rows:
+                    if len(patch_rows) == len(progress_rows):
+                        for curr, p in zip(progress_rows, patch_rows):
+                            if p.get("description"):
+                                curr["description"] = str(p["description"])
+                        merged["progress"]["rows"] = progress_rows
+                    else:
+                        merged["progress"]["rows"] = [
+                            {
+                                "description": r.get("description", ""),
+                                "weight": _number(r.get("weight", 0)),
+                                "previous": _number(r.get("previous", 0)),
+                                "this_month": _number(r.get("this_month", 0)),
+                                "plan": _number(r.get("plan", 0)),
+                            }
+                            for r in patch_rows
+                        ]
+
+            _update_draft(data_dir, session["username"], merged)
+            return jsonify({"ok": True, "draft": merged})
+
+        except Exception as exc:
+            app.logger.exception("AI draft generation failed")
+            return jsonify({"error": f"AI draft failed: {exc}"}), 500
+
     @app.post("/monthly/delete")
     def delete_monthly_report():
         auth = require_login_json()

@@ -263,6 +263,35 @@
         </div>
         <div class="alert alert-warning py-2 small d-none" id="coverage-detail"></div>
 
+        <!-- Timesheet upload (optional) -->
+        <div class="mb-3 border rounded p-3" id="timesheet-card" style="background:#f8fafc;">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <strong class="small">📊 Upload Timesheet <span class="text-muted fw-normal">(optional)</span></strong>
+            <span class="text-muted" style="font-size:.75rem;">Excel .xlsx — overwrites headcount &amp; man-hours from timesheet data</span>
+          </div>
+          <div class="d-flex gap-2 align-items-center flex-wrap">
+            <input type="file" class="form-control form-control-sm" id="timesheet-file" accept=".xlsx,.xls" style="max-width:300px;">
+            <button class="btn btn-sm btn-outline-secondary" id="timesheet-btn" onclick="uploadTimesheet()">Process Timesheet</button>
+          </div>
+          <div class="small text-success mt-1 d-none" id="timesheet-result"></div>
+        </div>
+
+        <!-- AI Draft card -->
+        <div class="mb-4 border rounded p-3" id="ai-draft-card" style="background:linear-gradient(135deg,#eef4fb 70%,#ece8ff);">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <strong>✨ Generate AI Draft</strong>
+            <span class="badge text-bg-secondary" style="font-size:.68rem;">Claude AI</span>
+          </div>
+          <div class="muted-note mb-2">Claude will write the executive summary, engineering &amp; procurement status, site activities, and areas of concern — based on compiled daily report data. Review all fields before generating the PDF.</div>
+          <div class="d-flex gap-2 align-items-start flex-wrap">
+            <input type="text" class="form-control form-control-sm" id="ai-instruction"
+              placeholder="Optional instruction: e.g. 'Translate to Bahasa Indonesia', 'Focus on mechanical progress', 'Be more concise'…"
+              style="max-width:520px;">
+            <button class="btn btn-primary" id="ai-draft-btn" onclick="generateAIDraft()">✨ Generate AI Draft</button>
+          </div>
+          <div class="small mt-2 d-none" id="ai-draft-status"></div>
+        </div>
+
         <div class="mb-4 d-none" id="source-manifest-panel">
           <div class="section-label">Included Daily Reports</div>
           <div class="table-responsive">
@@ -382,6 +411,7 @@
 let monthlySource = 'stored_json';
 let monthlyDraftId = '';
 let reportType = 'monthly';
+let _monthlyAiHistory = [];
 
 function parseIsoDate(value) {
   if (!value) return null;
@@ -629,6 +659,9 @@ async function compileMonthly() {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || `Could not compile ${reportType} report.`);
     monthlyDraftId = data.draft_id;
+    _monthlyAiHistory = [];
+    document.getElementById('ai-draft-status').className = 'small mt-2 d-none';
+    document.getElementById('timesheet-result').className = 'small text-success mt-1 d-none';
     populateMonthlyReview(data.draft);
     document.getElementById('monthly-review-panel').classList.remove('d-none');
     document.getElementById('monthly-review-panel').scrollIntoView({behavior:'smooth'});
@@ -831,6 +864,54 @@ async function postMonthlyPdf(endpoint, save) {
 
 function previewMonthly() { return postMonthlyPdf('/monthly/preview', false); }
 function generateMonthly() { return postMonthlyPdf('/monthly/generate', true); }
+
+async function uploadTimesheet() {
+  const file = document.getElementById('timesheet-file').files[0];
+  if (!file) { showMonthlyAlert('Choose an Excel timesheet file first.', 'warning'); return; }
+  if (!monthlyDraftId) { showMonthlyAlert('Compile a draft first.', 'warning'); return; }
+  setLoading('timesheet-btn', true, 'Processing…');
+  const form = new FormData();
+  form.append('timesheet', file);
+  try {
+    const res = await fetch(`/monthly/timesheet/${encodeURIComponent(monthlyDraftId)}`, {method:'POST', body:form});
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Timesheet processing failed.');
+    populateMonthlyReview(data.draft);
+    const r = document.getElementById('timesheet-result');
+    r.textContent = `✓ ${data.parsed.days_found} day(s) · peak ${data.parsed.total_manpower} workers · ${data.parsed.total_man_hours} man-hours`;
+    r.classList.remove('d-none');
+  } catch (err) {
+    showMonthlyAlert(err.message);
+  } finally {
+    setLoading('timesheet-btn', false);
+  }
+}
+
+async function generateAIDraft() {
+  if (!monthlyDraftId) { showMonthlyAlert('Compile a draft first.', 'warning'); return; }
+  const instruction = (document.getElementById('ai-instruction').value || '').trim();
+  const statusEl = document.getElementById('ai-draft-status');
+  statusEl.className = 'small mt-2 text-muted';
+  statusEl.textContent = 'Generating — this may take 15–30 seconds…';
+  statusEl.classList.remove('d-none');
+  setLoading('ai-draft-btn', true, 'AI is writing…');
+  try {
+    const res = await fetch(`/monthly/ai_draft/${encodeURIComponent(monthlyDraftId)}`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({instruction}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'AI draft failed.');
+    populateMonthlyReview(data.draft);
+    statusEl.className = 'small mt-2 text-success';
+    statusEl.textContent = '✓ AI draft applied — review all fields before generating the PDF.';
+  } catch (err) {
+    statusEl.className = 'small mt-2 text-danger';
+    statusEl.textContent = `✗ ${err.message}`;
+  } finally {
+    setLoading('ai-draft-btn', false);
+  }
+}
 
 function deleteReport(filename, btn) {
   if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
