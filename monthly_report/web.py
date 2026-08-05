@@ -728,12 +728,9 @@ def register_monthly_routes(
                 parsed_project = _clean_text(data.get("project_no"), 250)
                 if parsed_project and parsed_project.casefold() != project_no.casefold():
                     warnings.append(
-                        f"{filename}: project number {parsed_project} does not match selected project {project_no}; file skipped."
+                        f"{filename}: PDF project ref '{parsed_project}' overridden with selected project '{project_no}'."
                     )
-                    continue
-                if not parsed_project:
-                    data["project_no"] = project_no
-                    data["project_title"] = data.get("project_title") or project_title
+                elif not parsed_project:
                     imported.setdefault("warnings", []).append("Project assigned from the user's selected project.")
                 data["project_no"] = project_no
                 if project_title:
